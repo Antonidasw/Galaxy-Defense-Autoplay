@@ -1,0 +1,172 @@
+import sys
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+                             QHBoxLayout, QPushButton, QLabel, QCheckBox, 
+                             QComboBox, QSpinBox, QTextEdit, QFrame, QListWidget,
+                             QListWidgetItem, QProgressBar)
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QFont, QColor, QPalette
+
+from vision import Vision
+from engine import AutomationEngine
+from data_logger import DataLogger
+
+class GalaxyDefenseGUI(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Galaxy Defense Autoplay - Pro")
+        self.setMinimumSize(900, 600)
+        
+        # Initialize Backend
+        self.vision = Vision()
+        self.logger = DataLogger()
+        self.engine = AutomationEngine(self.vision, self.logger, log_callback=self.log)
+        
+        self._init_ui()
+        self._apply_styles()
+        
+        # Timer for engine background tasks
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.engine.run_one_cycle)
+        self.timer.start(500) # Check every 0.5s
+
+    def _init_ui(self):
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QHBoxLayout(central_widget)
+        
+        # --- LEFT SIDEBAR (Status & Stats) ---
+        sidebar = QVBoxLayout()
+        stats_frame = QFrame()
+        stats_frame.setFrameShape(QFrame.StyledPanel)
+        stats_layout = QVBoxLayout(stats_frame)
+        
+        self.status_label = QLabel("Status: IDLE")
+        self.status_label.setStyleSheet("font-weight: bold; color: #ffcc00;")
+        
+        self.win_rate_label = QLabel("Win Rate: 0%")
+        self.total_games_label = QLabel("Total Games: 0")
+        
+        stats_layout.addWidget(QLabel("DASHBOARD"))
+        stats_layout.addWidget(self.status_label)
+        stats_layout.addWidget(self.total_games_label)
+        stats_layout.addWidget(self.win_rate_label)
+        stats_layout.addStretch()
+        
+        sidebar.addWidget(stats_frame)
+        
+        # --- CENTER AREA (Settings) ---
+        settings_panel = QVBoxLayout()
+        
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("Game Mode:"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["Normal", "Elite"])
+        mode_layout.addWidget(self.mode_combo)
+        
+        loop_layout = QHBoxLayout()
+        loop_layout.addWidget(QLabel("Loop Cycles:"))
+        self.loop_spin = QSpinBox()
+        self.loop_spin.setRange(-1, 999) # -1 for infinite
+        self.loop_spin.setValue(10)
+        loop_layout.addWidget(self.loop_spin)
+        loop_layout.addWidget(QLabel("(-1 = Non-stop)"))
+        
+        self.fail_check = QCheckBox("Stop on Game Failure")
+        self.fail_check.setChecked(True)
+        
+        btn_layout = QHBoxLayout()
+        self.start_btn = QPushButton("START BOT")
+        self.start_btn.setFixedHeight(50)
+        self.start_btn.clicked.connect(self.start_bot)
+        
+        self.stop_btn = QPushButton("STOP")
+        self.stop_btn.setFixedHeight(50)
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self.stop_bot)
+        
+        btn_layout.addWidget(self.start_btn)
+        btn_layout.addWidget(self.stop_btn)
+        
+        # Logs
+        self.console = QTextEdit()
+        self.console.setReadOnly(True)
+        self.console.setPlaceholderText("Logs will appear here...")
+        
+        settings_panel.addLayout(mode_layout)
+        settings_panel.addLayout(loop_layout)
+        settings_panel.addWidget(self.fail_check)
+        settings_panel.addLayout(btn_layout)
+        settings_panel.addWidget(QLabel("LOGS:"))
+        settings_panel.addWidget(self.console)
+        
+        # --- RIGHT SIDE (Weapon Priorities) ---
+        priority_panel = QVBoxLayout()
+        priority_panel.addWidget(QLabel("WEAPON PRIORITY"))
+        self.weapon_list = QListWidget()
+        # Mock weapons (user will add templates)
+        for w in ["Railgun", "Thunder_Bolt", "Flame_Thrower", "Laser_Turret"]:
+            item = QListWidgetItem(w)
+            self.weapon_list.addItem(item)
+        
+        priority_panel.addWidget(self.weapon_list)
+        priority_panel.addWidget(QLabel("Drag items to prioritize"))
+        
+        # Add all segments to main layout
+        main_layout.addLayout(sidebar, 1)
+        main_layout.addLayout(settings_panel, 3)
+        main_layout.addLayout(priority_panel, 1)
+
+    def _apply_styles(self):
+        # Premium Dark Theme
+        self.setStyleSheet("""
+            QMainWindow { background-color: #121212; color: #e0e0e0; }
+            QLabel { color: #bdbdbd; font-size: 14px; }
+            QPushButton { 
+                background-color: #333333; 
+                border: 1px solid #555555; 
+                padding: 10px; 
+                border-radius: 5px; 
+                color: white; 
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #444444; border-color: #0078d4; }
+            QPushButton#start_btn { background-color: #1b5e20; }
+            QPushButton#start_btn:hover { background-color: #2e7d32; }
+            QTextEdit { background-color: #1e1e1e; border: 1px solid #333333; color: #76ff03; font-family: 'Courier New'; }
+            QFrame { border: 1px solid #333333; border-radius: 10px; background-color: #1e1e1e; }
+            QComboBox, QSpinBox { background-color: #333333; border: 1px solid #555555; color: white; padding: 5px; }
+        """)
+
+    def start_bot(self):
+        self.log("Initializing automation...")
+        settings = {
+            "mode": self.mode_combo.currentText(),
+            "loop_count": self.loop_spin.value(),
+            "stop_on_fail": self.fail_check.isChecked(),
+            "priorities": [self.weapon_list.item(i).text() for i in range(self.weapon_list.count())]
+        }
+        self.engine.set_settings(**settings)
+        self.engine.start()
+        
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.status_label.setText("Status: RUNNING")
+        self.status_label.setStyleSheet("color: #00e676; font-weight: bold;")
+
+    def stop_bot(self):
+        self.engine.stop()
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.status_label.setText("Status: STOPPED")
+        self.status_label.setStyleSheet("color: #f44336; font-weight: bold;")
+        self.log("Bot stopped by user.")
+
+    def log(self, message):
+        timestamp = time.strftime("[%H:%M:%S]")
+        self.console.append(f"{timestamp} {message}")
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = GalaxyDefenseGUI()
+    window.show()
+    sys.exit(app.exec())
