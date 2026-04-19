@@ -1,4 +1,3 @@
-import time
 import os
 from vision import Vision
 from mouse import human_click, random_pause
@@ -78,29 +77,50 @@ class AutomationEngine:
         self.state = "IN_GAME"
         pass
 
-    def _handle_in_game(self):
-        # The main logic during battle
-        # 1. Look for weapon selection/upgrade offers
-        self._manage_weapons()
-        # 2. Check if battle ended (Victory/Defeat)
-        pass
+    def _handle_in_game(self, region=None):
+        """The main logic during battle"""
+        # 1. State Check: ONLY manage weapons if 'Level Up' exists on screen
+        anchor_path = os.path.join("templates", "anchor_level_up.png")
+        if not os.path.exists(anchor_path):
+            return
+            
+        pos, val = self.v.find_template(anchor_path, threshold=0.7, region_points=region)
+        if pos:
+            self.log("Level Up screen detected! Starting weapon selection...")
+            self._manage_weapons(region=region)
+        else:
+            # We are in battle, stay idle
+            pass
 
-    def _manage_weapons(self):
-        """Identifies weapon cards on screen and chooses based on 5-slot logic"""
-        # Get all .png files in templates/weapons
+    def _manage_weapons(self, region=None):
+        """Identifies weapon cards on screen and chooses based on 5-slot logic and ROI"""
         if not os.path.exists(self.templates_weapon_dir):
             return
 
-        offered_weapons = [] # List of (name, pos, is_elite)
-        
         templates = [f for f in os.listdir(self.templates_weapon_dir) if f.endswith(".png")]
         
+        # 1. Sync CURRENT weapons (Status Zone ROI)
+        # We scan the top region to see what we actually have
+        self.current_weapons = []
         for t_name in templates:
             weapon_name = t_name.split(".")[0]
             path = os.path.join(self.templates_weapon_dir, t_name)
-            matches = self.v.find_all_matches(path, threshold=0.8)
+            # Scan top 15%-35% of the window
+            status_matches = self.v.find_all_matches(path, threshold=0.8, region_points=region, v_range=(0.15, 0.35))
+            if status_matches:
+                self.current_weapons.append(weapon_name)
+        
+        self.log(f"Synced owned weapons: {self.current_weapons}")
+
+        # 2. Identify OFFERED weapons (Choice Zone ROI)
+        offered_weapons = []
+        for t_name in templates:
+            weapon_name = t_name.split(".")[0]
+            path = os.path.join(self.templates_weapon_dir, t_name)
+            # Scan middle-bottom 40%-80% of the window
+            choice_matches = self.v.find_all_matches(path, threshold=0.8, region_points=region, v_range=(0.40, 0.80))
             
-            for pos, conf in matches:
+            for pos, conf in choice_matches:
                 is_elite = self.v.check_is_elite(pos)
                 offered_weapons.append({
                     "name": weapon_name,
@@ -111,18 +131,17 @@ class AutomationEngine:
         if not offered_weapons:
             return
 
-        # LOGIC:
-        # 1. If < 5 weapons owned, prioritize picking a NEW weapon
+        # 3. Apply Decision Logic
         choice = None
+        # Priority 1: Fill 5 slots
         if len(self.current_weapons) < 5:
             for w in offered_weapons:
                 if w["name"] not in self.current_weapons:
                     choice = w
                     break
         
-        # 2. If no new weapon chosen (or already have 5), pick best upgrade
+        # Priority 2: Best Upgrade
         if not choice:
-            # Sort by Elite status first, then maybe priorities
             offered_weapons.sort(key=lambda x: x["is_elite"], reverse=True)
             for w in offered_weapons:
                 if w["name"] in self.current_weapons:
@@ -130,10 +149,10 @@ class AutomationEngine:
                     break
         
         if choice:
-            print(f"Choosing weapon: {choice['name']} (Elite: {choice['is_elite']})")
+            self.log(f"Decision: Click {choice['name']} (Elite: {choice['is_elite']})")
             human_click(choice["pos"][0], choice["pos"][1])
-            if choice["name"] not in self.current_weapons:
-                self.current_weapons.append(choice["name"])
+            # Sleep for 3 seconds as requested to wait for UI transitions
+            time.sleep(3)
             random_pause(0.5, 1.0)
 
     def _handle_result(self):

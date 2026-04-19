@@ -73,19 +73,28 @@ class Vision:
             img = np.array(sct_img)
             return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
 
-    def find_all_matches(self, template_path, threshold=0.8, region_points=None):
+    def find_all_matches(self, template_path, threshold=0.8, region_points=None, v_range=None):
         """
         Finds all occurrences of a template.
+        v_range: Optional tuple (start_pct, end_pct) e.g. (0.1, 0.3) for vertical slice.
         Returns a list of ((x, y), confidence).
         """
         region_px = None
         if region_points:
-            region_px = (
+            region_px = [
                 region_points[0] * self.scale_x,
                 region_points[1] * self.scale_y,
                 region_points[2] * self.scale_x,
                 region_points[3] * self.scale_y
-            )
+            ]
+            
+            # Apply vertical ROI within the region if v_range is provided
+            if v_range:
+                orig_h = region_px[3]
+                start_y = region_px[1] + (orig_h * v_range[0])
+                end_y = region_px[1] + (orig_h * v_range[1])
+                region_px[1] = start_y
+                region_px[3] = end_y - start_y
 
         screen_bgr = self.capture_screen(region=region_px)
         template = cv2.imread(template_path)
@@ -93,8 +102,6 @@ class Vision:
             return []
 
         h, w = template.shape[:2]
-        # For simplicity in 'find_all', we use scale 1.0 for now, 
-        # but we can iterate if needed.
         res = cv2.matchTemplate(screen_bgr, template, cv2.TM_CCOEFF_NORMED)
         loc = np.where(res >= threshold)
         
@@ -104,8 +111,11 @@ class Vision:
             rel_center_pt_x = (pt[0] + w // 2) / self.scale_x
             rel_center_pt_y = (pt[1] + h // 2) / self.scale_y
             
+            # Apply offsets
             abs_center_x = rel_center_pt_x + (region_points[0] if region_points else 0)
-            abs_center_y = rel_center_pt_y + (region_points[1] if region_points else 0)
+            # If v_range was used, the screen_bgr starts at the offset
+            v_offset_pt = (region_points[3] * v_range[0]) if (region_points and v_range) else 0
+            abs_center_y = rel_center_pt_y + (region_points[1] if region_points else 0) + v_offset_pt
             
             matches.append(((int(abs_center_x), int(abs_center_y)), res[pt[1], pt[0]]))
             
@@ -141,3 +151,34 @@ class Vision:
 if __name__ == "__main__":
     v = Vision()
     print("Vision initialized.")
+
+    def get_preview_qimage(self, region_points=None, width=400):
+        """
+        Captures the screen and returns a QImage for the GUI.
+        """
+        from PySide6.QtGui import QImage
+        from PySide6.QtCore import Qt
+        
+        region_px = None
+        if region_points:
+            region_px = [
+                region_points[0] * self.scale_x,
+                region_points[1] * self.scale_y,
+                region_points[2] * self.scale_x,
+                region_points[3] * self.scale_y
+            ]
+
+        screen_bgr = self.capture_screen(region=region_px)
+        if screen_bgr is None:
+            return None
+            
+        height, width_orig, channels = screen_bgr.shape
+        bytes_per_line = channels * width_orig
+        
+        # Convert BGR to RGB
+        screen_rgb = cv2.cvtColor(screen_bgr, cv2.COLOR_BGR2RGB)
+        
+        q_img = QImage(screen_rgb.data, width_orig, height, bytes_per_line, QImage.Format_RGB888)
+        # Note: In PySide6, we need to pass a copy or handle memory if data is from numpy
+        q_img_copy = q_img.copy() 
+        return q_img_copy.scaledToWidth(width, Qt.SmoothTransformation)

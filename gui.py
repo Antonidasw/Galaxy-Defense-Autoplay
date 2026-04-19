@@ -3,8 +3,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QCheckBox, 
                              QComboBox, QSpinBox, QTextEdit, QFrame, QListWidget,
                              QListWidgetItem, QProgressBar)
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QColor, QPalette
+from PySide6.QtCore import Qt, QTimer, QSize
+from PySide6.QtGui import QFont, QColor, QPalette, QPixmap
 
 from vision import Vision
 from engine import AutomationEngine
@@ -24,10 +24,14 @@ class GalaxyDefenseGUI(QMainWindow):
         self._init_ui()
         self._apply_styles()
         
-        # Timer for engine background tasks
+        # Timer for engine and UI updates
         self.timer = QTimer()
-        self.timer.timeout.connect(self.engine.run_one_cycle)
-        self.timer.start(500) # Check every 0.5s
+        self.timer.timeout.connect(self._on_timer_tick)
+        self.timer.start(500) 
+        
+        self.preview_timer = QTimer()
+        self.preview_timer.timeout.connect(self._update_preview)
+        self.preview_timer.start(200) # 5 FPS preview
 
     def _init_ui(self):
         central_widget = QWidget()
@@ -46,10 +50,18 @@ class GalaxyDefenseGUI(QMainWindow):
         self.win_rate_label = QLabel("Win Rate: 0%")
         self.total_games_label = QLabel("Total Games: 0")
         
+        # --- PREVIEW AREA ---
+        self.preview_label = QLabel("Live Preview Not Available")
+        self.preview_label.setFixedSize(200, 260)
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setStyleSheet("background-color: #000; border: 2px solid #333; color: #555;")
+        
         stats_layout.addWidget(QLabel("DASHBOARD"))
         stats_layout.addWidget(self.status_label)
         stats_layout.addWidget(self.total_games_label)
         stats_layout.addWidget(self.win_rate_label)
+        stats_layout.addWidget(QLabel("LIVE VIEW:"))
+        stats_layout.addWidget(self.preview_label)
         stats_layout.addStretch()
         
         sidebar.addWidget(stats_frame)
@@ -160,6 +172,26 @@ class GalaxyDefenseGUI(QMainWindow):
         self.status_label.setText("Status: STOPPED")
         self.status_label.setStyleSheet("color: #f44336; font-weight: bold;")
         self.log("Bot stopped by user.")
+
+    def _on_timer_tick(self):
+        """Update both engine and general UI stats"""
+        self.engine.run_one_cycle()
+        # Update win rate and totals from logger
+        stats = self.logger.get_stats()
+        self.win_rate_label.setText(f"Win Rate: {stats['win_rate']:.1f}%")
+        self.total_games_label.setText(f"Total Games: {stats['total_games']}")
+
+    def _update_preview(self):
+        """Refresh the screenshot preview in the sidebar"""
+        # Find window bounds (using target title from config or engine)
+        win_title = "Galaxy Defense" # This should ideally come from engine config
+        region = self.vision.get_window_bounds(win_title)
+        
+        q_img = self.vision.get_preview_qimage(region_points=region, width=200)
+        if q_img:
+            self.preview_label.setPixmap(QPixmap.fromImage(q_img))
+        else:
+            self.preview_label.setText("Window Not Found")
 
     def log(self, message):
         timestamp = time.strftime("[%H:%M:%S]")
