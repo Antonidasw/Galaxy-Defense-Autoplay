@@ -1,14 +1,36 @@
 import sys
+import time
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QLabel, QCheckBox, 
                              QComboBox, QSpinBox, QTextEdit, QFrame, QListWidget,
                              QListWidgetItem, QProgressBar)
-from PySide6.QtCore import Qt, QTimer, QSize
+from PySide6.QtCore import Qt, QTimer, QSize, QThread, Signal
 from PySide6.QtGui import QFont, QColor, QPalette, QPixmap
 
 from vision import Vision
 from engine import AutomationEngine
 from data_logger import DataLogger
+
+class EngineWorker(QThread):
+    log_sig = Signal(str)
+    stop_sig = Signal()
+
+    def __init__(self, engine):
+        super().__init__()
+        self.engine = engine
+        # safely route cross-thread callbacks to GUI signals
+        self.engine.log_callback = self.log_sig.emit
+        self.engine.on_stop_callback = self.stop_sig.emit
+        self._active = True
+
+    def run(self):
+        while self._active:
+            self.engine.run_one_cycle()
+            time.sleep(0.05) # 50ms engine tick speed
+
+    def terminate_worker(self):
+        self._active = False
+        self.wait()
 
 class GalaxyDefenseGUI(QMainWindow):
     def __init__(self):
@@ -19,19 +41,29 @@ class GalaxyDefenseGUI(QMainWindow):
         # Initialize Backend
         self.vision = Vision()
         self.logger = DataLogger()
-        self.engine = AutomationEngine(self.vision, self.logger, log_callback=self.log)
+        self.engine = AutomationEngine(self.vision, self.logger)
+        
+        # Threading wrapper
+        self.worker = EngineWorker(self.engine)
+        self.worker.log_sig.connect(self.log)
+        self.worker.stop_sig.connect(self._on_engine_stopped)
+        self.worker.start() # Start background loop
         
         self._init_ui()
         self._apply_styles()
         
-        # Timer for engine and UI updates
+        # Timer for UI Stats alone (does not block)
         self.timer = QTimer()
-        self.timer.timeout.connect(self._on_timer_tick)
+        self.timer.timeout.connect(self._update_stats)
         self.timer.start(500) 
         
         self.preview_timer = QTimer()
         self.preview_timer.timeout.connect(self._update_preview)
         self.preview_timer.start(200) # 5 FPS preview
+
+    def closeEvent(self, event):
+        self.worker.terminate_worker()
+        super().closeEvent(event)
 
     def _init_ui(self):
         central_widget = QWidget()
@@ -167,26 +199,31 @@ class GalaxyDefenseGUI(QMainWindow):
 
     def stop_bot(self):
         self.engine.stop()
+        self.log("Bot stopped manually by user.")
+
+    def _on_engine_stopped(self):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self.status_label.setText("Status: STOPPED")
+        self.status_label.setText("Status: STOPPED / FINISHED")
         self.status_label.setStyleSheet("color: #f44336; font-weight: bold;")
-        self.log("Bot stopped by user.")
 
-    def _on_timer_tick(self):
-        """Update both engine and general UI stats"""
-        self.engine.run_one_cycle()
-        # Update win rate and totals from logger
+    def _update_stats(self):
+        """Update general UI stats efficiently"""
         stats = self.logger.get_stats()
         self.win_rate_label.setText(f"Win Rate: {stats['win_rate']:.1f}%")
         self.total_games_label.setText(f"Total Games: {stats['total_games']}")
 
     def _update_preview(self):
         """Refresh the screenshot preview in the sidebar"""
-        # Find window bounds (using target title from config or engine)
-        win_title = "Galaxy Defense" # This should ideally come from engine config
-        region = self.vision.get_window_bounds(win_title)
-        
+        # Find window bounds ONCE to prevent AppleScript from completely freezing GUI event thread
+        if not hasattr(self, '_cached_preview_region'):
+            self._cached_preview_region = self.vision.get_window_bounds("Galaxy Defense")
+            
+        # Prefer the freshly locked engine bounds, fallback to the GUI one-time bounds
+        region = getattr(self.engine, "cached_region", None)
+        if region is None:
+            region = self._cached_preview_region
+            
         q_img = self.vision.get_preview_qimage(region_points=region, width=200)
         if q_img:
             self.preview_label.setPixmap(QPixmap.fromImage(q_img))
