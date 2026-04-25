@@ -107,6 +107,11 @@ class GalaxyDefenseGUI(QMainWindow):
         self.mode_combo.addItems(["Normal", "Elite"])
         mode_layout.addWidget(self.mode_combo)
         
+        mode_layout.addWidget(QLabel("Level:"))
+        self.level_mode_combo = QComboBox()
+        self.level_mode_combo.addItems(["Current Level", "Maximum Level"])
+        mode_layout.addWidget(self.level_mode_combo)
+        
         loop_layout = QHBoxLayout()
         loop_layout.addWidget(QLabel("Loop Cycles:"))
         self.loop_spin = QSpinBox()
@@ -185,6 +190,7 @@ class GalaxyDefenseGUI(QMainWindow):
         self.log("Initializing automation...")
         settings = {
             "mode": self.mode_combo.currentText(),
+            "level_mode": self.level_mode_combo.currentText(),
             "loop_count": self.loop_spin.value(),
             "stop_on_fail": self.fail_check.isChecked(),
             "priorities": [self.weapon_list.item(i).text() for i in range(self.weapon_list.count())]

@@ -15,12 +15,16 @@ class AutomationEngine:
         self.loop_count = 0
         self.infinite_loop = False
         self.mode = "Normal" # "Normal" or "Elite"
+        self.level_mode = "Current Level"
+        self.max_level_offset = 0
+        self.max_scan_tries = 0
+        self.adjust_remaining = 0
         
         self.current_weapons = [] # List of weapon names owned in the 5 slots
         self.current_loop = 0
         self.pause_until = 0 # Non-blocking sleep mechanism
         
-        self.state = "IDLE" # IDLE, LOBBY, PRE_GAME, IN_GAME, RESULT
+        self.state = "IDLE" # IDLE, LOBBY_PREP_MODE, LOBBY_PREP_MAX_SCAN, LOBBY_PREP_MAX_ADJUST, LOBBY, VERIFY_LOBBY_EXIT, PRE_GAME, IN_GAME, RESULT_EXIT, RESULT
         self.templates_weapon_dir = "templates/weapons"
 
     def log(self, text):
@@ -28,8 +32,9 @@ class AutomationEngine:
         if self.log_callback:
             self.log_callback(text)
 
-    def set_settings(self, mode, loop_count, stop_on_fail, priorities):
+    def set_settings(self, mode, level_mode, loop_count, stop_on_fail, priorities):
         self.mode = mode
+        self.level_mode = level_mode
         self.loop_count = loop_count
         self.infinite_loop = (loop_count == -1)
         self.stop_on_fail = stop_on_fail
@@ -38,7 +43,9 @@ class AutomationEngine:
     def start(self):
         self.running = True
         self.current_loop = 0
-        self.state = "LOBBY"
+        self.state = "LOBBY_PREP_MODE"
+        self.max_level_offset = 0
+        self.max_scan_tries = 0
         
         # Cache region here so we don't spam AppleScript 2 times a second!
         self.cached_region = self.v.get_window_bounds("Galaxy Defense")
@@ -62,14 +69,108 @@ class AutomationEngine:
 
         region = getattr(self, "cached_region", None)
 
-        if self.state == "LOBBY":
+        if self.state == "LOBBY_PREP_MODE":
+            self._handle_lobby_prep_mode(region)
+        elif self.state == "LOBBY_PREP_MAX_SCAN":
+            self._handle_lobby_prep_max_scan(region)
+        elif self.state == "LOBBY_PREP_MAX_ADJUST":
+            self._handle_lobby_prep_max_adjust(region)
+        elif self.state == "LOBBY":
             self._handle_lobby(region)
+        elif self.state == "VERIFY_LOBBY_EXIT":
+            self._verify_lobby_exit(region)
         elif self.state == "PRE_GAME":
             self._handle_pre_game(region)
         elif self.state == "IN_GAME":
             self._handle_in_game(region)
+        elif self.state == "RESULT_EXIT":
+            self._handle_result_exit(region)
         elif self.state == "RESULT":
             self._handle_result()
+
+    def _handle_lobby_prep_mode(self, region=None):
+        # Only look for the INACTIVE version of our target mode.
+        # If we find it, it means we are currently in the WRONG mode, so we click it.
+        # If we don't find it, we assume we are already in the right mode!
+        inactive_path = os.path.join("templates", f"mode_{self.mode}_inactive.png")
+        if os.path.exists(inactive_path):
+            pos, val = self.v.find_template(inactive_path, threshold=0.85, region_points=region)
+            if pos:
+                self.log(f"Switching Difficulty to: {self.mode}")
+                human_click(pos[0], pos[1])
+                self.pause_until = time.time() + 1.0 # Wait 1s for the background color animation
+        else:
+            self.log(f"Note: '{inactive_path}' not found (Already in {self.mode} or template missing).")
+            
+        if self.level_mode == "Maximum Level":
+            self.state = "LOBBY_PREP_MAX_SCAN"
+            self.max_scan_tries = 0
+        else:
+            self.state = "LOBBY"
+
+    def _handle_lobby_prep_max_scan(self, region=None):
+        locked_path = os.path.join("templates", "level_locked.png")
+        if not os.path.exists(locked_path):
+            self.log("Note: 'level_locked.png' missing. Cannot find maximum level. Skipping.")
+            self.state = "LOBBY"
+            return
+            
+        pos, val = self.v.find_template(locked_path, threshold=0.85, region_points=region)
+        if pos:
+            self.log("Found locked level! Backing up to maximum playable level.")
+            prev_path = os.path.join("templates", "level_prev.png")
+            if os.path.exists(prev_path):
+                p_pos, p_val = self.v.find_template(prev_path, threshold=0.85, region_points=region)
+                if p_pos:
+                    human_click(p_pos[0], p_pos[1])
+                    self.pause_until = time.time() + 0.5
+                else:
+                    self.log("Warning: Found lock but could not find '<' button!")
+                    
+            self.adjust_remaining = abs(self.max_level_offset)
+            self.adjust_fails = 0
+            self.state = "LOBBY_PREP_MAX_ADJUST"
+        else:
+            # Click Next
+            next_path = os.path.join("templates", "level_next.png")
+            if os.path.exists(next_path):
+                n_pos, n_val = self.v.find_template(next_path, threshold=0.85, region_points=region)
+                if n_pos:
+                    human_click(n_pos[0], n_pos[1])
+                    self.pause_until = time.time() + 0.5
+                    self.max_scan_tries += 1
+                    if self.max_scan_tries > 15:
+                        self.log("Max scan limit reached. Stopping search.")
+                        self.state = "LOBBY"
+                else:
+                    self.log("'level_next.png' not found on screen. Stopping search.")
+                    self.state = "LOBBY"
+            else:
+                self.log("'level_next.png' missing. Skipping.")
+                self.state = "LOBBY"
+
+    def _handle_lobby_prep_max_adjust(self, region=None):
+        if self.adjust_remaining > 0:
+            prev_path = os.path.join("templates", "level_prev.png")
+            if os.path.exists(prev_path):
+                p_pos, p_val = self.v.find_template(prev_path, threshold=0.85, region_points=region)
+                if p_pos:
+                    self.log(f"Applying level offset. -{self.adjust_remaining} remaining.")
+                    human_click(p_pos[0], p_pos[1])
+                    self.pause_until = time.time() + 0.5
+                    self.adjust_remaining -= 1
+                    self.adjust_fails = 0
+                else:
+                    self.adjust_fails = getattr(self, "adjust_fails", 0) + 1
+                    if self.adjust_fails > 20: # Timeout after ~1 second of not finding it
+                        self.log("Warning: Could not find '<' button. Stopping adjustment.")
+                        self.state = "LOBBY"
+                        self.adjust_fails = 0
+            else:
+                self.log("'level_prev.png' missing. Skipping adjust.")
+                self.state = "LOBBY"
+        else:
+            self.state = "LOBBY"
 
     def _handle_lobby(self, region=None):
         # 1. Scan for Ads/Popups/Paywalls
@@ -82,13 +183,27 @@ class AutomationEngine:
             if pos:
                 self.log("Battle button found! Clicking...")
                 human_click(pos[0], pos[1])
-                self.pause_until = time.time() + 2 # wait 2 sec
-                self.state = "PRE_GAME"
+                self.pause_until = time.time() + 0.5 # wait 0.5 sec
+                self.state = "VERIFY_LOBBY_EXIT"
             else:
                 self.log("Lobby: Scanning for Battle button...")
         else:
             self.log("Warning: 'battle_btn.png' not found in templates folder!")
             self.stop()
+
+    def _verify_lobby_exit(self, region=None):
+        battle_path = os.path.join("templates", "battle_btn.png")
+        if os.path.exists(battle_path):
+            pos, val = self.v.find_template(battle_path, threshold=0.9, region_points=region)
+            if pos:
+                self.log("Battle button still visible. Click may have failed or game is loading. Retrying...")
+                human_click(pos[0], pos[1])
+                self.pause_until = time.time() + 0.5
+            else:
+                self.log("Battle button disappeared. Entering game...")
+                self.state = "PRE_GAME"
+        else:
+            self.state = "PRE_GAME"
 
     def _skip_popups(self, region):
         """Looks for 'X' buttons or 'Close' text to skip paywalls"""
@@ -102,7 +217,7 @@ class AutomationEngine:
         We just wait a bit and transition to IN_GAME to start scanning for Level Up/Extra Chance.
         """
         self.log("Transitioning to Battle field...")
-        self.pause_until = time.time() + 2
+        self.pause_until = time.time() + 0.5
         self.state = "IN_GAME"
 
     def _handle_in_game(self, region=None):
@@ -111,6 +226,13 @@ class AutomationEngine:
         region_px = self.v.get_region_px(region)
         master_screen = self.v.capture_screen(region_px)
         
+        # 0. Global Failsafe: Check if we are accidentally in the Lobby
+        battle_path = os.path.join("templates", "battle_btn.png")
+        if os.path.exists(battle_path) and self.v.find_template(battle_path, threshold=0.9, region_points=region, screen_bgr=master_screen)[0]:
+            self.log("Failsafe triggered: Found Battle button while IN_GAME. Resetting to LOBBY.")
+            self.state = "LOBBY_PREP_MODE"
+            return
+
         # 1. Check for Result (Defeat/Victory)
         if self._check_result(region, master_screen):
             return
@@ -138,6 +260,7 @@ class AutomationEngine:
             self.log("Game Over: Defeat detected.")
             self.logger.record_game(self.mode, "Loss", 0)
             
+            self.max_level_offset -= 1
             if self.stop_on_fail:
                 self.log("Stopping bot as 'Stop on Failure' is enabled.")
                 self.stop()
@@ -153,6 +276,7 @@ class AutomationEngine:
         if v_found or p_found:
             self.log("Victory/Perfect Clear detected!")
             self.logger.record_game(self.mode, "Win", 0)
+            self.max_level_offset = 0
             self._handle_cycle_end(region)
             return True
             
@@ -167,17 +291,21 @@ class AutomationEngine:
                 self.stop()
                 return
                 
-        self._click_back_button(region)
-        self.state = "LOBBY"
+        self.state = "RESULT_EXIT"
 
-    def _click_back_button(self, region):
+    def _handle_result_exit(self, region):
         back_path = os.path.join("templates", "back_btn.png")
         if os.path.exists(back_path):
             pos, val = self.v.find_template(back_path, threshold=0.9, region_points=region)
             if pos:
                 self.log("Clicking Back button...")
                 human_click(pos[0], pos[1])
-                self.pause_until = time.time() + 2
+                self.pause_until = time.time() + 0.5
+            else:
+                self.log("Back button disappeared. Returning to Lobby Prep...")
+                self.state = "LOBBY_PREP_MODE"
+        else:
+            self.state = "LOBBY_PREP_MODE"
 
     def _handle_extra_chance(self, region, screen_bgr=None):
         self.log("Handling Extra Chance...")
@@ -187,7 +315,7 @@ class AutomationEngine:
             if c_pos:
                 self.log("Claim button found. Clicking!")
                 human_click(c_pos[0], c_pos[1])
-                self.pause_until = time.time() + 2
+                self.pause_until = time.time() + 0.5
                 return
 
         card_back = os.path.join("templates", "extra_card_back.png")
@@ -196,7 +324,7 @@ class AutomationEngine:
             if card_pos:
                 self.log("Flipping card.")
                 human_click(card_pos[0], card_pos[1])
-                self.pause_until = time.time() + 2
+                self.pause_until = time.time() + 0.5
 
     def _manage_weapons(self, region=None, pre_captured_screen=None):
         """Identifies weapon cards on screen and chooses based on 5-slot logic and ROI"""
@@ -277,7 +405,7 @@ class AutomationEngine:
             self.log(f"Decision: Click {choice['name']} (Elite: {choice['is_elite']})")
             human_click(choice["pos"][0], choice["pos"][1])
             # Sleep mechanism via state engine instead of thread blocking
-            self.pause_until = time.time() + 3 + 0.5 # 3.5 sec equivalent
+            self.pause_until = time.time() + 0.5 # 0.5 sec equivalent
 
     def _handle_result(self):
         # Migrated to _check_result inside _handle_in_game
